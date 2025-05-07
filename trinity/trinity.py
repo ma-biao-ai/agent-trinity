@@ -6,6 +6,7 @@ from typing import (
     Union,
     Callable,
     Sequence,
+    Literal,
 )
 from textwrap import dedent
 from pydantic import BaseModel, Field
@@ -21,7 +22,7 @@ from agno.media import (
 )
 
 from agno.agent import Agent, RunResponse
-from agno.utils.log import logger
+from utils.logger import logi, loge
 
 
 class Trinity:
@@ -54,7 +55,7 @@ class Trinity:
     user_id: Optional[str] = None
 
     # --- Trinity tools ---
-    mcp_tools: Optional[Toolkit] = None
+    tools: Optional[Toolkit] = None
 
     # --- restore agent ---
     # if needed, restore the environment
@@ -70,7 +71,7 @@ class Trinity:
         description: Optional[str] = None,
         instructions: Optional[Union[str, List[str], Callable]] = None,
         user_id: Optional[str] = None,
-        mcp_tools: Optional[Toolkit] = None,
+        tools: Optional[Toolkit] = None,
         need_restore: bool = False,
     ):
         self.model = model
@@ -80,14 +81,14 @@ class Trinity:
         self.description = description
         self.instructions = instructions
         self.user_id = user_id
-        self.mcp_tools = [mcp_tools] if isinstance(mcp_tools, Toolkit) else None
+        self.tools = [tools] if isinstance(tools, Toolkit) else None
         self.need_restore = need_restore
 
     def _create_worker(self):
         worker_model = self.model if isinstance(self.model, Model) else self.model[0]
         self.worker = Agent(
             model=worker_model,
-            tools=self.mcp_tools,
+            tools=self.tools,
             name=f"{self.name} Worker",
             instructions=self.instructions,
             response_model=WorkerResponse,
@@ -99,7 +100,7 @@ class Trinity:
         checker_model = self.model if isinstance(self.model, Model) else self.model[1]
         self.checker = Agent(
             model=checker_model,
-            tools=self.mcp_tools,
+            tools=self.tools,
             name=f"{self.name} Checker",
             instructions=dedent(
                 """\
@@ -137,7 +138,7 @@ class Trinity:
         )
         self.arbitrator = Agent(
             model=arbitrator_model,
-            tools=self.mcp_tools,
+            tools=self.tools,
             name=f"{self.name} Arbitrator",
             instructions=dedent(
                 """\
@@ -161,7 +162,7 @@ class Trinity:
         restorer_model = self.model if isinstance(self.model, Model) else self.model[0]
         self.restorer = Agent(
             model=restorer_model,
-            tools=self.mcp_tools,
+            tools=self.tools,
             name=f"{self.name} Restorer",
             instructions=dedent(
                 """\
@@ -174,6 +175,154 @@ class Trinity:
             markdown=True,
             show_tool_calls=True,
         )
+
+    def run(
+        self,
+        message: Optional[Union[str, List, Dict, Message]] = None,
+        *,
+        stream: Literal[False] = False,
+        audio: Optional[Sequence[Audio]] = None,
+        images: Optional[Sequence[Image]] = None,
+        videos: Optional[Sequence[Video]] = None,
+        files: Optional[Sequence[File]] = None,
+        messages: Optional[Sequence[Union[Dict, Message]]] = None,
+        stream_intermediate_steps: bool = False,
+        retries: Optional[int] = None,
+        **kwargs: Any,
+    )-> RunResponse:
+        self._create_worker()
+        self._create_checker()
+        self._create_arbitrator()
+        logi(f'trinity worker/checker/arbitrator created.')
+        try:
+            worker_response: RunResponse = self.worker.run(
+                message=message,
+                audio=audio,
+                images=images,
+                videos=videos,
+                files=files,
+                messages=messages,
+                retries=retries,
+                stream=stream,
+                stream_intermediate_steps=stream_intermediate_steps,
+                **kwargs,
+            )
+            if worker_response is None or not worker_response.content:
+                return RunResponse(
+                    content="Sorry, worker could not provide a response."
+                )
+
+            checker_retry_times = 0
+            checker_recheck_times = 0
+
+            checker_response = None
+            arbitrator_response = None
+            while checker_recheck_times < 3:
+                while checker_retry_times < 3:
+                    if arbitrator_response is None:
+                        arbitrator_response_content = ''
+                    else:
+                        arbitrator_response_content = str(arbitrator_response.content)
+                    checker_response: RunResponse = self.checker.run(
+                        message=f"user message: {message}, worker response: {str(worker_response.content)}, arbitrator response: {arbitrator_response_content}",
+                        audio=audio,
+                        images=images,
+                        videos=videos,
+                        files=files,
+                        messages=messages,
+                        retries=retries,
+                        stream=stream,
+                        stream_intermediate_steps=stream_intermediate_steps,
+                        **kwargs,
+                    )
+                    if checker_response is None or not checker_response.content:
+                        checker_retry_times += 1
+                        continue
+                    else:
+                        break
+
+                if checker_response is None or not checker_response.content:
+                    loge(f'checker could not provide a response.')
+                    return RunResponse(
+                        content="Sorry, checker could not provide a response."
+                    )
+
+                # If checker passes, return the worker's response directly
+                if checker_response.content.status:
+                    logi(f'checker passes, return worker response directly.')
+                    return worker_response
+
+                logi(f'checker rejects, go to arbitrator.')
+                arbitrator_retry_times = 0
+                while arbitrator_retry_times < 3:
+                    arbitrator_response: RunResponse = self.arbitrator.run(
+                        message=f"user message: {message}, worker response: {str(worker_response.content)}, checker response: {str(checker_response.content)}",
+                        audio=audio,
+                        images=images,
+                        videos=videos,
+                        files=files,
+                        messages=messages,
+                        retries=retries,
+                        stream=stream,
+                        stream_intermediate_steps=stream_intermediate_steps,
+                        **kwargs,
+                    )
+                    if arbitrator_response is None or not arbitrator_response.content:
+                        arbitrator_retry_times += 1
+                        continue
+                    else:
+                        break
+                if arbitrator_response is None or not arbitrator_response.content:
+                    loge(f'arbitrator could not provide a response.')
+                    return RunResponse(
+                        content="Sorry, arbitrator could not provide a response."
+                    )
+
+                if arbitrator_response.content.status:
+                    logi(f'aribtrator response is done, return!!!')
+                    return arbitrator_response
+                else:
+                    checker_recheck_times += 1
+                    continue
+
+            if self.need_restore:
+                logi(f'need restore, go to restorer.')
+                self._create_restorer()
+                # restore the environment
+                restore_retry_times = 0
+                while restore_retry_times < 3:
+                    restorer_response: RunResponse = self.restorer.run(
+                        message=f"user message: {message}, worker response: {worker_response.content}",
+                        audio=audio,
+                        images=images,
+                        videos=videos,
+                        files=files,
+                        messages=messages,
+                        retries=retries,
+                        stream=stream,
+                        stream_intermediate_steps=stream_intermediate_steps,
+                        **kwargs,
+                    )
+                    if restorer_response is None or not restorer_response.content:
+                        restore_retry_times += 1
+                        continue
+                    else:
+                        break
+
+                if restorer_response is None or not restorer_response.content:
+                    logi(f'restorer could not provide a response.')
+                    arbitrator_response.content["message"] += (
+                        "\n" + "Sorry, restorer could not provide a response."
+                    )
+                else:
+                    logi(f'restorer provides a response.')
+                    arbitrator_response.content["message"] += (
+                        "\n" + restorer_response.content
+                    )
+
+            return arbitrator_response
+        except Exception as e:
+            loge(f"Error in trinity: {e}")
 
     async def arun(
         self,
@@ -190,7 +339,8 @@ class Trinity:
         self._create_worker()
         self._create_checker()
         self._create_arbitrator()
-        for mcp_tool in self.mcp_tools:
+        logi(f'trinity worker/checker/arbitrator created.')
+        for mcp_tool in self.tools:
             await mcp_tool.__aenter__()
         try:
             worker_response: RunResponse = await self.worker.arun(
@@ -204,6 +354,7 @@ class Trinity:
                 **kwargs,
             )
             if worker_response is None or not worker_response.content:
+                loge(f'worker could not provide a response.')
                 return RunResponse(
                     content="Sorry, worker could not provide a response."
                 )
@@ -236,14 +387,17 @@ class Trinity:
                         break
 
                 if checker_response is None or not checker_response.content:
+                    loge(f'checker could not provide a response.')
                     return RunResponse(
                         content="Sorry, checker could not provide a response."
                     )
 
                 # If checker passes, return the worker's response directly
                 if checker_response.content.status:
-                    return checker_response
+                    logi(f'checker passes, return worker response directly.')
+                    return worker_response
 
+                logi(f'checker rejects, go to arbitrator.')
                 arbitrator_retry_times = 0
                 while arbitrator_retry_times < 3:
                     arbitrator_response: RunResponse = await self.arbitrator.arun(
@@ -262,17 +416,20 @@ class Trinity:
                     else:
                         break
                 if arbitrator_response is None or not arbitrator_response.content:
+                    loge(f'arbitrator could not provide a response.')
                     return RunResponse(
                         content="Sorry, arbitrator could not provide a response."
                     )
 
                 if arbitrator_response.content.status:
+                    logi(f'aribtrator response is done, return!!!')
                     return arbitrator_response
                 else:
                     checker_recheck_times += 1
                     continue
 
             if self.need_restore:
+                logi(f'need restore, go to restorer.')
                 self._create_restorer()
                 # restore the environment
                 restore_retry_times = 0
@@ -294,32 +451,31 @@ class Trinity:
                         break
 
                 if restorer_response is None or not restorer_response.content:
+                    logi(f'restorer could not provide a response.')
                     arbitrator_response.content["message"] += (
                         "\n" + "Sorry, restorer could not provide a response."
                     )
                 else:
+                    logi(f'restorer provides a response.')
                     arbitrator_response.content["message"] += (
                         "\n" + restorer_response.content
                     )
 
             return arbitrator_response
         except Exception as e:
-            logger.error(f"Error in trinity: {e}")
+            loge(f"Error in trinity: {e}")
         finally:
-            for mcp_tool in self.mcp_tools:
+            for mcp_tool in self.tools:
                 await mcp_tool.__aexit__(None, None, None)
 
 
 class WorkerModification(BaseModel):
-    modified_time: str = Field(default="", description="modified time")
     target: str = Field(
         default="",
         description="modified target, including file, folder, registry, etc.",
     )
     original_content: str = Field(default="", description="original content")
     modified_content: str = Field(default="", description="modified content")
-    worker_name: str = Field(default="", description="worker name")
-    worker_id: str = Field(default="", description="worker id")
 
 
 class WorkerResponse(BaseModel):

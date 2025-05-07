@@ -8,24 +8,17 @@ from agno.tools.mcp import MCPTools
 from agno.models.deepseek import DeepSeek
 from agno.agent import Agent, RunResponse
 
-mcp_tools = MCPTools(
-        command=f"npx --yes @negokaz/excel-mcp-server",
-        env={"EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"}
-    )
-
-excel_path = os.path.join(curr_path, "score.xlsx")
-excel_trinity = Trinity(
+history_trinity = Trinity(
     model=DeepSeek(id="deepseek-chat"),
-    name="excel_trinity",
-    description="A trinity for handling Excel files.",
-    tools=mcp_tools,
+    name="history_trinity",
+    description="A trinity for history introduction.",
     instructions=dedent("""\
-        You are an Excel operation assistant:
-        - If the user needs to read Excel information, extract relevant data from the Excel file and present organized results;
-        - If the user requires modifications or additions, implement the requested changes to the Excel sheet;
-        - If a value is modified, check and update any affected fields as it may impact other fields.
-        - After making modifications or additions, provide a before-and-after comparison of the altered or newly added entries.\
-    """) + f"\n\nCurrent Excel file path: {excel_path}"
+        You are a historical Q&A assistant:
+        -Answer users' history-related questions concisely and logically;
+        -Only consider well-documented official historical records;
+        -Clearly state "unknown" or "undetermined" for unverifiable historical queries with no reliable sources;
+        -Organize historical information chronologically.\
+    """)
 )
 
 if __name__ == "__main__":
@@ -39,7 +32,7 @@ if __name__ == "__main__":
                 if message.lower() in ["exit", "quit"]:
                     break
 
-                response:RunResponse = await excel_trinity.arun(message=message)
+                response:RunResponse = history_trinity.run(message=message)
                 if response.content:
                     console.print(Markdown(response.content.message))
             except Exception as e:

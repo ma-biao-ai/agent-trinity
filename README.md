@@ -34,10 +34,13 @@ This architecture is developed based on the [**Agno**](https://github.com/agno-a
     python3 -m venv myvenv
     source myvenv/bin/activate
     # install necessary lib in python venv
-    pip install -U agno openai mcp mcp[cli] uv
+    pip install -U agno openai mcp mcp[cli] uv poetry
     ```
     + use agno and trinity
     ``` bash
+    # git pull agno and install agno
+    poetry build
+    pip install dist/agno-***-py3-none-any.whl (your agno version)
     # choose your model, and write api key in activate, like deepseek
     export DEEPSEEK_API_KEY=sk-***************(your api key)
     # start python venv
@@ -45,5 +48,52 @@ This architecture is developed based on the [**Agno**](https://github.com/agno-a
     # run an agno example
     python3 cookbook/models/deepseek/basic.py 
     # run trinity example
-    python3 example/excel_trinity/excel_trinity_demo.py
+    python3 example/basic_trinity/basic_trinity_demo.py
+    ```
+
+## Example
++ [basic_trinity_demo.py](example/basic_trinity/basic_trinity_demo.py)
+    + basic_trinity_demo.py is a simple example of how to use the trinity agent.
+    ``` python
+    from trinity.trinity import Trinity
+    from textwrap import dedent
+    from agno.tools.mcp import MCPTools
+    from agno.models.deepseek import DeepSeek
+    from agno.agent import Agent, RunResponse
+    
+    history_trinity = Trinity(
+        model=DeepSeek(id="deepseek-chat"),
+        name="history_trinity",
+        description="A trinity for history introduction.",
+        instructions=dedent("""\
+            You are a historical Q&A assistant:
+            -Answer users' history-related questions concisely and logically;
+            -Only consider well-documented official historical records;
+            -Clearly state "unknown" or "undetermined" for unverifiable historical queries with no reliable sources;
+            -Organize historical information chronologically.\
+        """)
+    )
+    
+    if __name__ == "__main__":
+        from rich.console import Console
+        from rich.markdown import Markdown
+        async def main():
+            console = Console()
+            while True:
+                try:
+                    message = input("Enter your question: ")
+                    if message.lower() in ["exit", "quit"]:
+                        break
+    
+                    response:RunResponse = history_trinity.run(message=message)
+                    if response.content:
+                        console.print(Markdown(response.content.message))
+                except Exception as e:
+                    print(f"An error occurred: {e}")
+        
+        try:
+            import asyncio
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("Exiting...")
     ```
